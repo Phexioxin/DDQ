@@ -92,6 +92,21 @@ if __name__ == "__main__":
     # RL agent parameters
     parser.add_argument('--experience_replay_pool_size', dest='experience_replay_pool_size', type=int, default=5000,
                         help='the size for experience replay')
+    parser.add_argument('--replay', dest='replay', type=str, default='uniform',
+                        help='replay strategy: uniform | per | hper')
+    parser.add_argument('--per_alpha', dest='per_alpha', type=float, default=0.6,
+                        help='priority exponent for PER/HPER')
+    parser.add_argument('--per_beta_start', dest='per_beta_start', type=float, default=0.4,
+                        help='initial importance sampling beta')
+    parser.add_argument('--per_beta_frames', dest='per_beta_frames', type=int, default=100000,
+                        help='frames over which beta will be annealed to 1.0')
+    parser.add_argument('--hper_quota_src', dest='hper_quota_src', type=str, default='1:1',
+                        help='source quota real:sim for HPER')
+    parser.add_argument('--hper_quota_len', dest='hper_quota_len', type=str, default='1:1:1',
+                        help='length quota short:med:long for HPER')
+    # legacy HPER flags retained for backward compatibility
+    parser.add_argument('--use_hper', dest='use_hper', type=int, default=0,
+                        help='(deprecated) 1 to use hierarchical prioritized experience replay')
     parser.add_argument('--dqn_hidden_size', dest='dqn_hidden_size', type=int, default=60,
                         help='the hidden size for DQN')
     parser.add_argument('--batch_size', dest='batch_size', type=int, default=16, help='batch size')
@@ -189,6 +204,14 @@ agent_params['predict_mode'] = params['predict_mode']
 agent_params['trained_model_path'] = params['trained_model_path']
 agent_params['warm_start'] = params['warm_start']
 agent_params['cmd_input_mode'] = params['cmd_input_mode']
+agent_params['replay'] = params['replay']
+agent_params['per_alpha'] = params['per_alpha']
+agent_params['per_beta_start'] = params['per_beta_start']
+agent_params['per_beta_frames'] = params['per_beta_frames']
+agent_params['hper_quota_src'] = params['hper_quota_src']
+agent_params['hper_quota_len'] = params['hper_quota_len']
+# legacy
+agent_params['use_hper'] = params['use_hper']
 
 # Manually set torch seed to ensure fail comparison.
 torch.manual_seed(params['torch_seed'])
@@ -226,6 +249,8 @@ usersim_params['simulator_run_mode'] = params['run_mode']
 usersim_params['simulator_act_level'] = params['act_level']
 usersim_params['learning_phase'] = params['learning_phase']
 usersim_params['hidden_size'] = params['dqn_hidden_size']
+usersim_params['experience_replay_pool_size'] = params['experience_replay_pool_size']
+usersim_params['use_hper'] = params['use_hper']
 
 if usr == 0:  # real user
     user_sim = RealUser(movie_dictionary, act_set, slot_set, goal_set, usersim_params)
