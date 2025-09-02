@@ -54,6 +54,7 @@ HPER divides transitions into value-based partitions and performs a two-stage sa
 The importance sampling weight for transition $i$ is computed as
 $ w_i = (1/(N \cdot P(i)))^{\beta} $
 where $P(i)$ is the sampling probability and $\beta$ controls bias correction. Partition boundaries expand dynamically when values exceed the current range, avoiding expensive rebalancing.
+The replay strategy can be switched by `--replay` (uniform|per|hper).
 
 Example configuration:
 ```
