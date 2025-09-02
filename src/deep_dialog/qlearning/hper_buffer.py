@@ -182,6 +182,7 @@ class HierarchicalReplayBuffer(object):
             diff = n - sum(desired)
 
         total_len = len(self)
+        actual = [0 for _ in xrange(self.partitions)]
         for part_idx in xrange(self.partitions):
             tree = self.trees[part_idx]
             need = desired[part_idx]
@@ -198,6 +199,7 @@ class HierarchicalReplayBuffer(object):
                     idx, p, data = tree.get(s)
                 batch.append(data)
                 idxs.append((part_idx, idx))
+                actual[part_idx] += 1
                 if self.disable_rotation:
                     # Without round-robin the probability of selecting a
                     # partition is ``need / n``. The sample probability is
@@ -213,11 +215,14 @@ class HierarchicalReplayBuffer(object):
                     prob = p / (tree.total() * self.partitions)
                 probs.append(prob)
 
+        fallback = [desired[i] - actual[i] for i in xrange(self.partitions)]
+
         while len(batch) < n and len(batch) > 0:
             k = random.randint(0, len(batch) - 1)
             batch.append(batch[k])
             idxs.append(idxs[k])
             probs.append(probs[k])
+
         # Importance weights follow ``w_i=(1/N * 1/P(i))^beta``. To ensure
         # numerical stability we clip probabilities and truncate weights at
         # the 99th percentile before normalizing by the batch max.
@@ -227,6 +232,14 @@ class HierarchicalReplayBuffer(object):
             cutoff = np.percentile(weights, 99)
             weights = np.minimum(weights, cutoff)
             weights = weights / np.max(weights)
+
+        # Log sample quota, fallback counts and current alpha/beta for
+        # reproducibility and analysis. These prints are no-ops when
+        # HPER is disabled.
+        print 'hper/sample_quota', {'target': desired, 'actual': actual}
+        print 'hper/fallback_counts', fallback
+        print 'hper/alpha_beta', {'alpha': self.alpha, 'beta': self.beta}
+
         return batch, idxs, weights
 
     def update(self, idxs, errors):
