@@ -218,7 +218,9 @@ class HierarchicalReplayBuffer(object):
             batch.append(batch[k])
             idxs.append(idxs[k])
             probs.append(probs[k])
-
+        # Importance weights follow ``w_i=(1/N * 1/P(i))^beta``. To ensure
+        # numerical stability we clip probabilities and truncate weights at
+        # the 99th percentile before normalizing by the batch max.
         weights = np.array([(total_len * max(p, 1e-10)) ** (-self.beta)
                             for p in probs])
         if len(weights) > 0:
