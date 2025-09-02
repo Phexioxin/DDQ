@@ -68,14 +68,11 @@ class AgentDQN(Agent):
                                         beta_start=self.per_beta_start,
                                         beta_frames=self.per_beta_frames)
         elif self.use_hper:
-            self.hper_env = HierarchicalReplayBuffer(self.experience_replay_pool_size,
-                                                     partitions=self.hper_partitions,
-                                                     beta=self.hper_beta,
-                                                     disable_rotation=self.hper_no_rotation,
-                                                     disable_priority=self.hper_no_priority)
-            self.hper_model = HierarchicalReplayBuffer(self.experience_replay_pool_size,
-                                                       partitions=self.hper_partitions,
-                                                       beta=self.hper_beta,
+            beta_inc = (1.0 - self.per_beta_start) / float(self.per_beta_frames)
+            self.hper_buffer = HierarchicalReplayBuffer(self.experience_replay_pool_size,
+                                                       alpha=self.per_alpha,
+                                                       beta=self.per_beta_start,
+                                                       beta_increment_per_sampling=beta_inc,
                                                        disable_rotation=self.hper_no_rotation,
                                                        disable_priority=self.hper_no_priority)
 
@@ -300,10 +297,9 @@ class AgentDQN(Agent):
             else:
                 conf = max_q
             if conf >= self.hper_confidence:
-                if from_model:
-                    self.hper_model.store(training_example, max_q)
-                else:
-                    self.hper_env.store(training_example, max_q)
+                src = 'sim' if from_model else 'real'
+                meta = {'src': src, 'turns': s_t['turn']}
+                self.hper_buffer.store(training_example, meta)
         elif self.replay == 'uniform' and self.warm_start != 1:
             if not from_model:
                 self.experience_replay_pool.append(training_example)
@@ -327,32 +323,19 @@ class AgentDQN(Agent):
                     idxs.append(idxs[k])
                     is_weights = np.append(is_weights, is_weights[k])
         elif self.use_hper:
-            half = batch_size / 2
-            batch = []
-            idxs = []
-            weights = []
-            if len(self.hper_env) > 0:
-                b, i, w = self.hper_env.sample(half)
-                for j in xrange(len(b)):
-                    batch.append(b[j])
-                    idxs.append((0, i[j][0], i[j][1]))
-                weights.extend(list(w))
-            if len(self.hper_model) > 0:
-                b, i, w = self.hper_model.sample(batch_size - half)
-                for j in xrange(len(b)):
-                    batch.append(b[j])
-                    idxs.append((1, i[j][0], i[j][1]))
-                weights.extend(list(w))
+            batch, idxs, weights = self.hper_buffer.sample(batch_size,
+                                                           self.hper_quota_src,
+                                                           self.hper_quota_len)
             if len(batch) < batch_size:
                 if len(batch) == 0:
-                    print 'sample_from_buffer: HPER buffers empty'
+                    print 'sample_from_buffer: HPER buffer empty'
                     return None, None, None
                 print 'sample_from_buffer: only %d samples, padding to %d' % (len(batch), batch_size)
                 while len(batch) < batch_size:
                     k = random.randint(0, len(batch) - 1)
                     batch.append(batch[k])
                     idxs.append(idxs[k])
-                    weights.append(weights[k])
+                    weights = np.append(weights, weights[k])
             is_weights = np.array(weights)
         else:
             if len(self.running_expereince_pool) == 0:
@@ -389,7 +372,7 @@ class AgentDQN(Agent):
             if self.replay == 'per':
                 n_steps = len(self.per_buffer) / (batch_size)
             elif self.use_hper:
-                n_steps = (len(self.hper_env) + len(self.hper_model)) / (batch_size)
+                n_steps = len(self.hper_buffer) / (batch_size)
             else:
                 n_steps = len(self.running_expereince_pool) / (batch_size)
             for iter in xrange(n_steps):
@@ -416,22 +399,7 @@ class AgentDQN(Agent):
                     self.per_buffer.update(idxs, errors)
                 elif self.use_hper:
                     errors = (state_value - expected_value).detach().numpy().flatten()
-                    env_idx = []
-                    env_err = []
-                    model_idx = []
-                    model_err = []
-                    for i in xrange(len(idxs)):
-                        src, p_idx, t_idx = idxs[i]
-                        if src == 0:
-                            env_idx.append((p_idx, t_idx))
-                            env_err.append(errors[i])
-                        else:
-                            model_idx.append((p_idx, t_idx))
-                            model_err.append(errors[i])
-                    if len(env_idx) > 0:
-                        self.hper_env.update(env_idx, env_err)
-                    if len(model_idx) > 0:
-                        self.hper_model.update(model_idx, model_err)
+                    self.hper_buffer.update(idxs, errors)
 
             if len(self.experience_replay_pool) != 0:
                 print "cur bellman err %.4f, experience replay pool %s, model replay pool %s, cur bellman err for planning %.4f" % (

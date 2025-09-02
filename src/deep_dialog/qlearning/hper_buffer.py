@@ -111,115 +111,111 @@ class PERBuffer(object):
 
 
 class HierarchicalReplayBuffer(object):
-    """Hierarchical Prioritized Experience Replay Buffer"""
-    def __init__(self, capacity, partitions=5, alpha=0.6, beta=0.4,
+    """Hierarchical Prioritized Experience Replay Buffer.
+
+    Samples are partitioned by experience source (real/sim) and trajectory
+    length (short/med/long). Each partition maintains its own Sum-Tree for
+    priority based sampling. Two-level quotas over source and length are used
+    to allocate batch slots. When rotation is enabled each partition is assumed
+    to be selected with probability ``1/partitions`` and the overall sample
+    probability becomes ``p/(tree.total()*partitions)``. The associated IS
+    weights follow ``w_i=(1/N*1/P(i))^beta``.
+    """
+
+    def __init__(self, capacity, alpha=0.6, beta=0.4,
                  beta_increment_per_sampling=0.001, disable_rotation=0,
-                 disable_priority=0):
+                 disable_priority=0, len_th=(6, 12)):
         self.capacity = capacity
-        self.partitions = partitions
         self.alpha = alpha
         self.beta = beta
         self.beta_increment_per_sampling = beta_increment_per_sampling
         self.disable_rotation = disable_rotation
         self.disable_priority = disable_priority
+        self.len_th = len_th
         self.max_priority = 1.0
 
-        per_capacity = max(1, capacity / partitions)
-        self.trees = []
-        for _ in xrange(partitions):
-            self.trees.append(SumTree(per_capacity))
-        self.meta_tree = SumTree(partitions)
+        self.partitions = 6  # 2 sources * 3 length buckets
+        per_capacity = max(1, capacity / self.partitions)
+        self.trees = [SumTree(per_capacity) for _ in xrange(self.partitions)]
 
-        self.min_val = -1.0
-        self.max_val = 1.0
-        self._recompute_boundaries()
-        self.next_partition = 0
-
-    def _recompute_boundaries(self):
-        self.boundaries = np.linspace(self.min_val, self.max_val,
-                                      self.partitions + 1).tolist()
-
-    def _get_partition(self, value):
-        if value < self.min_val:
-            self.min_val = value
-            self._recompute_boundaries()
-        elif value > self.max_val:
-            self.max_val = value
-            self._recompute_boundaries()
-        for i in xrange(self.partitions):
-            if value <= self.boundaries[i + 1]:
-                return i
-        return self.partitions - 1
-
-    def _update_meta(self, part_idx):
-        if self.disable_priority:
-            total = len(self.trees[part_idx])
+    def _partition_index(self, src, turns):
+        if src == 'sim':
+            s = 1
         else:
-            total = self.trees[part_idx].total()
-        self.meta_tree.update(part_idx + self.meta_tree.capacity - 1, total)
+            s = 0
+        if turns < self.len_th[0]:
+            l = 0
+        elif turns <= self.len_th[1]:
+            l = 1
+        else:
+            l = 2
+        return s * 3 + l
 
-    def store(self, data, value):
-        """Insert a transition with associated state value.
-
-        The state value decides which partition will hold the sample. New
-        entries are always inserted with maximum priority so that they can be
-        seen at least once before being updated by TD errors.
-        """
-        part_idx = self._get_partition(value)
+    def store(self, data, meta):
+        part_idx = self._partition_index(meta.get('src', 'real'),
+                                         meta.get('turns', 0))
         if self.disable_priority:
             priority = 1.0
         else:
             priority = self.max_priority
         self.trees[part_idx].add(priority, data)
-        self._update_meta(part_idx)
 
-    def sample(self, n):
-        """Sample ``n`` items, returning data, indices and IS weights."""
-
+    def sample(self, n, quota_src='1:1', quota_len='1:1:1'):
         batch = []
         idxs = []
-        weights = []
+        probs = []
         self.beta = min(1.0, self.beta + self.beta_increment_per_sampling)
-        total_meta = self.meta_tree.total()
+
+        # compute desired quota for each partition
+        a, b = [float(x) for x in quota_src.split(':')]
+        x, y, z = [float(x) for x in quota_len.split(':')]
+        src_ratio = [a/(a+b), b/(a+b)]
+        len_ratio = [x/(x+y+z), y/(x+y+z), z/(x+y+z)]
+        desired = []
+        for s in xrange(2):
+            for l in xrange(3):
+                desired.append(int(round(n * src_ratio[s] * len_ratio[l])))
+        diff = n - sum(desired)
+        while diff != 0:
+            idx = np.argmax([len(self.trees[i]) for i in xrange(self.partitions)])
+            desired[idx] += 1 if diff > 0 else -1
+            diff = n - sum(desired)
+
         total_len = len(self)
-        i = 0
-        while i < n and total_len > 0:
-            if self.disable_rotation:
-                s = random.random() * total_meta
-                part_idx, _, _ = self.meta_tree.get(s)
-                part_idx = part_idx - self.meta_tree.capacity + 1
-            else:
-                part_idx = self.next_partition
-                self.next_partition = (self.next_partition + 1) % self.partitions
+        for part_idx in xrange(self.partitions):
             tree = self.trees[part_idx]
-            if len(tree) == 0:
-                continue
-            if self.disable_priority:
-                leaf = random.randint(0, tree.n_entries - 1)
-                idx = leaf + tree.capacity - 1
-                p = tree.tree[idx]
-                data = tree.data[leaf]
-            else:
-                s = random.random() * tree.total()
-                idx, p, data = tree.get(s)
-            batch.append(data)
-            idxs.append((part_idx, idx))
-            if self.disable_rotation:
-                if total_meta == 0:
-                    prob = 1.0
+            need = desired[part_idx]
+            for _ in xrange(need):
+                if len(tree) == 0:
+                    continue
+                if self.disable_priority:
+                    leaf = random.randint(0, tree.n_entries - 1)
+                    idx = leaf + tree.capacity - 1
+                    p = tree.tree[idx]
+                    data = tree.data[leaf]
                 else:
-                    prob = p / total_meta
-            else:
-                # Round-robin partition selection: P(partition)=1/partitions.
-                # Conditional probability inside partition follows
-                # PER definition P(i|k)=p / tree.total().
-                # Overall probability P(i)=P(k) * P(i|k)=p/(tree.total()*partitions)
-                prob = p / (tree.total() * self.partitions)
-            weight = (total_len * prob) ** (-self.beta)
-            weights.append(weight)
-            i += 1
-        weights = np.array(weights)
+                    s = random.random() * tree.total()
+                    idx, p, data = tree.get(s)
+                batch.append(data)
+                idxs.append((part_idx, idx))
+                if self.disable_rotation:
+                    denom = tree.total() * (len(self.trees))
+                    prob = p / denom if denom > 0 else 0
+                else:
+                    prob = p / (tree.total() * self.partitions)
+                probs.append(prob)
+
+        while len(batch) < n and len(batch) > 0:
+            k = random.randint(0, len(batch) - 1)
+            batch.append(batch[k])
+            idxs.append(idxs[k])
+            probs.append(probs[k])
+
+        weights = np.array([(total_len * max(p, 1e-10)) ** (-self.beta)
+                            for p in probs])
         if len(weights) > 0:
+            cutoff = np.percentile(weights, 99)
+            weights = np.minimum(weights, cutoff)
             weights = weights / np.max(weights)
         return batch, idxs, weights
 
@@ -231,7 +227,6 @@ class HierarchicalReplayBuffer(object):
             tree.update(tree_idx, p)
             if p > self.max_priority:
                 self.max_priority = p
-            self._update_meta(part_idx)
 
     def __len__(self):
         total = 0
