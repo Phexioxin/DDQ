@@ -199,9 +199,17 @@ class HierarchicalReplayBuffer(object):
                 batch.append(data)
                 idxs.append((part_idx, idx))
                 if self.disable_rotation:
-                    denom = tree.total() * (len(self.trees))
-                    prob = p / denom if denom > 0 else 0
+                    # Without round-robin the probability of selecting a
+                    # partition is ``need / n``. The sample probability is
+                    # ``(need/n) * (p / tree.total())`` which is used later
+                    # for IS weight computation.
+                    part_prob = float(need) / float(n) if n > 0 else 0
+                    denom = tree.total()
+                    prob = part_prob * (p / denom if denom > 0 else 0)
                 else:
+                    # Under round-robin each partition is chosen with
+                    # probability ``1/partitions``. The probability of a
+                    # leaf becomes ``p/(tree.total()*partitions)``.
                     prob = p / (tree.total() * self.partitions)
                 probs.append(prob)
 
