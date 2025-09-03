@@ -210,9 +210,11 @@ class HierarchicalReplayBuffer(object):
                     denom = tree.total()
                     prob = part_quota * (p / denom if denom > 0 else 0)
                 else:
-                    # Under round-robin each partition is chosen with
-                    # probability ``1/partitions``. The probability of a
-                    # leaf becomes ``p/(tree.total()*partitions)``.
+                    # Under round-robin each partition is visited with equal
+                    # probability ``1/partitions``.  The global probability of
+                    # drawing leaf ``i`` is therefore
+                    # ``P(i)=1/partitions * p/tree.total()`` which we compute
+                    # as ``p/(tree.total()*partitions)``.
                     prob = p / (tree.total() * self.partitions)
                 probs.append(prob)
 

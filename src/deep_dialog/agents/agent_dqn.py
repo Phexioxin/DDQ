@@ -351,8 +351,19 @@ class AgentDQN(Agent):
                     batch.append(batch[k])
             is_weights = np.ones(len(batch))
 
+        # Guard against degenerate minibatches.  ``len(batch)`` may still be
+        # zero if the underlying buffer is empty; in that case skip the
+        # optimization step.  Otherwise ensure the returned weight vector matches
+        # the batch length before constructing numpy arrays.
         if len(batch) == 0:
             return None, None, None
+        if len(is_weights) != len(batch):
+            # pad or truncate weights to match samples to avoid shape mismatch
+            if len(is_weights) < len(batch):
+                pad = [is_weights[-1]] * (len(batch) - len(is_weights))
+                is_weights = np.append(is_weights, pad)
+            else:
+                is_weights = is_weights[:len(batch)]
 
         bsize = len(batch)
         np_batch = []
