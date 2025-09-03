@@ -223,22 +223,30 @@ class HierarchicalReplayBuffer(object):
             idxs.append(idxs[k])
             probs.append(probs[k])
 
-        # Importance weights follow ``w_i=(1/N * 1/P(i))^beta``. To ensure
-        # numerical stability we clip probabilities and truncate weights at
-        # the 99th percentile before normalizing by the batch max.
-        weights = np.array([(total_len * max(p, 1e-10)) ** (-self.beta)
-                            for p in probs])
-        if len(weights) > 0:
-            cutoff = np.percentile(weights, 99)
-            weights = np.minimum(weights, cutoff)
-            weights = weights / np.max(weights)
+        # Importance weights follow ``w_i=(1/N * 1/P(i))^beta``. Probabilities
+        # are clipped for numerical stability and weights truncated at the
+        # 99th percentile before normalizing by the batch max. The clipping
+        # rate is logged for diagnostics.
+        raw_weights = np.array([(total_len * max(p, 1e-10)) ** (-self.beta)
+                                for p in probs])
+        clip_rate = 0.0
+        if len(raw_weights) > 0:
+            cutoff = np.percentile(raw_weights, 99)
+            clip_mask = raw_weights > cutoff
+            weights = np.minimum(raw_weights, cutoff)
+            if np.max(weights) > 0:
+                weights = weights / np.max(weights)
+            clip_rate = float(np.sum(clip_mask)) / float(len(raw_weights))
+        else:
+            weights = raw_weights
 
-        # Log sample quota, fallback counts and current alpha/beta for
-        # reproducibility and analysis. These prints are no-ops when
-        # HPER is disabled.
+        # Log sample quota, fallback counts, current alpha/beta and the
+        # proportion of clipped weights for reproducibility and analysis.
+        # These prints are no-ops when HPER is disabled.
         print 'hper/sample_quota', {'target': desired, 'actual': actual}
         print 'hper/fallback_counts', fallback
         print 'hper/alpha_beta', {'alpha': self.alpha, 'beta': self.beta}
+        print 'hper/is_clip_rate', clip_rate
 
         return batch, idxs, weights
 
