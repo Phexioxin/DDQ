@@ -201,13 +201,14 @@ class HierarchicalReplayBuffer(object):
                 idxs.append((part_idx, idx))
                 actual[part_idx] += 1
                 if self.disable_rotation:
-                    # Without round-robin the probability of selecting a
-                    # partition is ``need / n``. The sample probability is
-                    # ``(need/n) * (p / tree.total())`` which is used later
-                    # for IS weight computation.
-                    part_prob = float(need) / float(n) if n > 0 else 0
+                    # Without round-robin the partition selection follows
+                    # quota proportions: :math:`P(h)=n_h/B` where ``n_h`` is
+                    # the target quota for this partition and ``B`` the batch
+                    # size.  The leaf probability is therefore
+                    # ``P(i)=P(h)*P(i|h)= (n_h/B) * (p/tree.total())``.
+                    part_quota = float(desired[part_idx]) / float(n) if n > 0 else 0
                     denom = tree.total()
-                    prob = part_prob * (p / denom if denom > 0 else 0)
+                    prob = part_quota * (p / denom if denom > 0 else 0)
                 else:
                     # Under round-robin each partition is chosen with
                     # probability ``1/partitions``. The probability of a

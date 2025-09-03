@@ -351,6 +351,9 @@ class AgentDQN(Agent):
                     batch.append(batch[k])
             is_weights = np.ones(len(batch))
 
+        if len(batch) == 0:
+            return None, None, None
+
         bsize = len(batch)
         np_batch = []
         for x in xrange(len(Transition._fields)):
