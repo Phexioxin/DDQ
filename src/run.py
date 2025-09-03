@@ -147,6 +147,17 @@ if __name__ == "__main__":
     args = parser.parse_args()
     params = vars(args)
 
+    # legacy flag: --use_hper sets replay strategy to hper
+    if params.get('use_hper', 0) == 1:
+        params['replay'] = 'hper'
+
+    # parse quota strings into canonical 'a:b'/'x:y:z'
+    try:
+        params['hper_quota_src'] = ':'.join([str(int(x)) for x in params['hper_quota_src'].split(':')])
+        params['hper_quota_len'] = ':'.join([str(int(x)) for x in params['hper_quota_len'].split(':')])
+    except Exception:
+        pass
+
     print 'Dialog Parameters: '
     print json.dumps(params, indent=2)
 
