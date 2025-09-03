@@ -115,11 +115,12 @@ class HierarchicalReplayBuffer(object):
 
     Samples are partitioned by experience source (real/sim) and trajectory
     length (short/med/long). Each partition maintains its own Sum-Tree for
-    priority based sampling. Two-level quotas over source and length are used
-    to allocate batch slots. When rotation is enabled each partition is assumed
-    to be selected with probability ``1/partitions`` and the overall sample
-    probability becomes ``p/(tree.total()*partitions)``. The associated IS
-    weights follow ``w_i=(1/N*1/P(i))^beta``.
+    priority based sampling. Two-level quotas over source and length allocate
+    batch slots. The global probability of drawing transition ``i`` from
+    partition ``h`` is ``P(i)=\pi(h)\,P(i|h)`` where ``\pi(h)`` is the
+    realized fraction ``n̂_h/B`` (or ``1/partitions`` under rotation) and
+    ``P(i|h)`` is proportional to the leaf priority. Importance weights are
+    ``w_i=(1/N*1/P(i))^beta``.
     """
 
     def __init__(self, capacity, alpha=0.6, beta=0.4,
@@ -201,26 +202,29 @@ class HierarchicalReplayBuffer(object):
                 idxs.append((part_idx, idx))
                 actual[part_idx] += 1
                 if self.disable_rotation:
-                    # Without round-robin the partition selection follows
-                    # quota proportions: :math:`P(h)=n_h/B` where ``n_h`` is
-                    # the target quota for this partition and ``B`` the batch
-                    # size.  The leaf probability is therefore
-                    # ``P(i)=P(h)*P(i|h)= (n_h/B) * (p/tree.total())``.
-                    part_quota = float(desired[part_idx]) / float(n) if n > 0 else 0
+                    # Without round-robin the partition selection follows the
+                    # *actual* quota ``n_hat`` collected so far rather than the
+                    # target quota.  The global probability becomes
+                    # ``P(i)=n_hat_h/B * p/tree.total()`` where ``n_hat_h`` is
+                    # the number of samples drawn from partition ``h``.
+                    part_quota = float(actual[part_idx]) / float(n) if n > 0 else 0
                     denom = tree.total()
                     prob = part_quota * (p / denom if denom > 0 else 0)
                 else:
                     # Under round-robin each partition is visited with equal
                     # probability ``1/partitions``.  The global probability of
-                    # drawing leaf ``i`` is therefore
-                    # ``P(i)=1/partitions * p/tree.total()`` which we compute
-                    # as ``p/(tree.total()*partitions)``.
+                    # drawing leaf ``i`` is ``P(i)=1/partitions * p/tree.total()``
+                    # [Schaul et al., 2016].
                     prob = p / (tree.total() * self.partitions)
                 probs.append(prob)
 
         fallback = [desired[i] - actual[i] for i in xrange(self.partitions)]
 
-        while len(batch) < n and len(batch) > 0:
+        if len(batch) == 0:
+            meta = {'skip_opt': True, 'quota': actual, 'fallback_counts': fallback}
+            return [], [], np.array([]), meta
+
+        while len(batch) < n:
             k = random.randint(0, len(batch) - 1)
             batch.append(batch[k])
             idxs.append(idxs[k])
@@ -243,15 +247,17 @@ class HierarchicalReplayBuffer(object):
         else:
             weights = raw_weights
 
-        # Log sample quota, fallback counts, current alpha/beta and the
-        # proportion of clipped weights for reproducibility and analysis.
-        # These prints are no-ops when HPER is disabled.
+        meta = {'quota': actual, 'fallback_counts': fallback,
+                'alpha_beta': {'alpha': self.alpha, 'beta': self.beta},
+                'is_clip_rate': clip_rate, 'skip_opt': False}
+
+        # Log sample quota and diagnostics when HPER is active.
         print 'hper/sample_quota', {'target': desired, 'actual': actual}
         print 'hper/fallback_counts', fallback
         print 'hper/alpha_beta', {'alpha': self.alpha, 'beta': self.beta}
         print 'hper/is_clip_rate', clip_rate
 
-        return batch, idxs, weights
+        return batch, idxs, weights, meta
 
     def update(self, idxs, errors):
         for i in xrange(len(idxs)):

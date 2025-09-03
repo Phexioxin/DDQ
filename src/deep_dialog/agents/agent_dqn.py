@@ -323,19 +323,12 @@ class AgentDQN(Agent):
                     idxs.append(idxs[k])
                     is_weights = np.append(is_weights, is_weights[k])
         elif self.use_hper:
-            batch, idxs, weights = self.hper_buffer.sample(batch_size,
-                                                           self.hper_quota_src,
-                                                           self.hper_quota_len)
-            if len(batch) < batch_size:
-                if len(batch) == 0:
-                    print 'sample_from_buffer: HPER buffer empty'
-                    return None, None, None
-                print 'sample_from_buffer: only %d samples, padding to %d' % (len(batch), batch_size)
-                while len(batch) < batch_size:
-                    k = random.randint(0, len(batch) - 1)
-                    batch.append(batch[k])
-                    idxs.append(idxs[k])
-                    weights = np.append(weights, weights[k])
+            batch, idxs, weights, meta = self.hper_buffer.sample(batch_size,
+                                                                  self.hper_quota_src,
+                                                                  self.hper_quota_len)
+            if meta.get('skip_opt', False):
+                print 'sample_from_buffer: HPER buffer empty'
+                return None, None, None
             is_weights = np.array(weights)
         else:
             if len(self.running_expereince_pool) == 0:

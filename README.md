@@ -49,12 +49,9 @@ all the data is under this folder: ./src/deep_dialog/data
 `--train_world_model`: train world model on the fly<br/>
 
 ### HPER: Hierarchical Prioritized Experience Replay
-HPER divides transitions into value-based partitions and performs a two-stage sampling process. A partition is chosen either by round-robin rotation or by sampling with cumulative priorities, then a transition is drawn from the selected partition via a binary sum tree yielding $\mathcal{O}(\log N)$ complexity.
+HPER divides transitions into value-based partitions and performs a two-stage sampling process. A partition is chosen by round-robin rotation (probability $1/H$) or by the realized fraction of samples per partition $\pi(h)=n_h/B$, then a transition is drawn from the selected partition with probability proportional to its priority via a binary sum tree yielding $\mathcal{O}(\log N)$ complexity.
 
-The importance sampling weight for transition $i$ is computed as
-$ w_i = (1/(N \cdot P(i)))^{\beta} $
-where $P(i)$ is the sampling probability and $\beta$ controls bias correction. Partition boundaries expand dynamically when values exceed the current range, avoiding expensive rebalancing.
-The replay strategy can be switched by `--replay` (uniform|per|hper).
+The overall sampling probability for transition $i$ is $P(i)=\pi(h_i)P(i\mid h_i)$ and the importance sampling weight is $ w_i = (1/(N \cdot P(i)))^{\beta}$ with batch-wise normalization and 99th-percentile clipping. Partition boundaries expand dynamically when values exceed the current range, avoiding expensive rebalancing. The replay strategy can be switched by `--replay` (uniform|per|hper).
 
 Example configuration:
 ```
