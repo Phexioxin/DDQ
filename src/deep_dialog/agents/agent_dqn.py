@@ -22,6 +22,8 @@ import torch
 import torch.optim as optim
 import torch.nn.functional as F
 
+from deep_dialog.qlearning.hper_buffer import HierarchicalReplayBuffer, PERBuffer
+
 DEVICE = torch.device('cpu')
 
 Transition = namedtuple('Transition', ('state', 'action', 'reward', 'next_state', 'term'))
@@ -48,6 +50,31 @@ class AgentDQN(Agent):
         self.experience_replay_pool_from_model = deque(
             maxlen=self.experience_replay_pool_size)  # experience replay pool <s_t, a_t, r_t, s_t+1>
         self.running_expereince_pool = None # hold experience from both user and world model
+        self.replay = params.get('replay', 'uniform')
+        self.per_alpha = params.get('per_alpha', 0.6)
+        self.per_beta_start = params.get('per_beta_start', 0.4)
+        self.per_beta_frames = params.get('per_beta_frames', 100000)
+        self.hper_quota_src = params.get('hper_quota_src', '1:1')
+        self.hper_quota_len = params.get('hper_quota_len', '1:1:1')
+        self.hper_partitions = params.get('hper_partitions', 5)
+        self.hper_beta = params.get('hper_beta', self.per_beta_start)
+        self.hper_no_rotation = params.get('hper_no_rotation', 0)
+        self.hper_no_priority = params.get('hper_no_priority', 0)
+        self.hper_confidence = params.get('hper_confidence', 0.0)
+        self.use_hper = 1 if self.replay == 'hper' else params.get('use_hper', 0)
+        if self.replay == 'per':
+            self.per_buffer = PERBuffer(self.experience_replay_pool_size,
+                                        alpha=self.per_alpha,
+                                        beta_start=self.per_beta_start,
+                                        beta_frames=self.per_beta_frames)
+        elif self.use_hper:
+            beta_inc = (1.0 - self.per_beta_start) / float(self.per_beta_frames)
+            self.hper_buffer = HierarchicalReplayBuffer(self.experience_replay_pool_size,
+                                                       alpha=self.per_alpha,
+                                                       beta=self.per_beta_start,
+                                                       beta_increment_per_sampling=beta_inc,
+                                                       disable_rotation=self.hper_no_rotation,
+                                                       disable_priority=self.hper_no_priority)
 
         self.hidden_size = params.get('dqn_hidden_size', 60)
         self.gamma = params.get('gamma', 0.9)
@@ -245,13 +272,35 @@ class AgentDQN(Agent):
         action_t = self.action
         reward_t = reward
         state_tplus1_rep = self.prepare_state_representation(s_tplus1)
-        st_user = self.prepare_state_representation(s_tplus1)
-        training_example = (state_t_rep, action_t, reward_t, state_tplus1_rep, episode_over, st_user)
+        # ``st_user`` provided by caller is ignored because the user's
+        # next-state representation is already captured in ``state_tplus1_rep``.
+        # Store a 5-tuple matching ``Transition`` for consistency.
+        training_example = (state_t_rep, action_t, reward_t,
+                            state_tplus1_rep, episode_over)
 
         if self.predict_mode == False:  # Training Mode
-            if self.warm_start == 1:
+            if self.warm_start == 1 and self.replay == 'uniform':
                 self.experience_replay_pool.append(training_example)
         else:  # Prediction Mode
+            if not from_model:
+                self.experience_replay_pool.append(training_example)
+            else:
+                self.experience_replay_pool_from_model.append(training_example)
+        if self.replay == 'per':
+            self.per_buffer.store(training_example)
+        elif self.use_hper:
+            q_values = self.dqn(torch.FloatTensor(state_t_rep)).detach().numpy()[0]
+            max_q = np.max(q_values)
+            q_sorted = np.sort(q_values)
+            if len(q_sorted) > 1:
+                conf = max_q - q_sorted[-2]
+            else:
+                conf = max_q
+            if conf >= self.hper_confidence:
+                src = 'sim' if from_model else 'real'
+                meta = {'src': src, 'turns': s_t['turn']}
+                self.hper_buffer.store(training_example, meta)
+        elif self.replay == 'uniform' and self.warm_start != 1:
             if not from_model:
                 self.experience_replay_pool.append(training_example)
             else:
@@ -261,15 +310,63 @@ class AgentDQN(Agent):
         """Sample batch size examples from experience buffer and convert it to torch readable format"""
         # type: (int, ) -> Transition
 
-        batch = [random.choice(self.running_expereince_pool) for i in xrange(batch_size)]
+        if self.replay == 'per':
+            batch, idxs, is_weights = self.per_buffer.sample(batch_size)
+            if len(batch) < batch_size:
+                if len(batch) == 0:
+                    print 'sample_from_buffer: PER buffer empty'
+                    return None, None, None
+                print 'sample_from_buffer: only %d samples, padding to %d' % (len(batch), batch_size)
+                while len(batch) < batch_size:
+                    k = random.randint(0, len(batch) - 1)
+                    batch.append(batch[k])
+                    idxs.append(idxs[k])
+                    is_weights = np.append(is_weights, is_weights[k])
+        elif self.use_hper:
+            batch, idxs, weights, meta = self.hper_buffer.sample(batch_size,
+                                                                  self.hper_quota_src,
+                                                                  self.hper_quota_len)
+            if meta.get('skip_opt', False):
+                print 'sample_from_buffer: HPER buffer empty'
+                return None, None, None
+            is_weights = np.array(weights)
+        else:
+            if len(self.running_expereince_pool) == 0:
+                print 'sample_from_buffer: experience replay empty'
+                return None, None, None
+            batch = [random.choice(self.running_expereince_pool)
+                     for i in xrange(min(batch_size, len(self.running_expereince_pool)))]
+            idxs = None
+            if len(batch) < batch_size:
+                print 'sample_from_buffer: only %d samples, padding to %d' % (len(batch), batch_size)
+                while len(batch) < batch_size:
+                    k = random.randint(0, len(batch) - 1)
+                    batch.append(batch[k])
+            is_weights = np.ones(len(batch))
+
+        # Guard against degenerate minibatches.  ``len(batch)`` may still be
+        # zero if the underlying buffer is empty; in that case skip the
+        # optimization step.  Otherwise ensure the returned weight vector matches
+        # the batch length before constructing numpy arrays.
+        if len(batch) == 0:
+            return None, None, None
+        if len(is_weights) != len(batch):
+            # pad or truncate weights to match samples to avoid shape mismatch
+            if len(is_weights) < len(batch):
+                pad = [is_weights[-1]] * (len(batch) - len(is_weights))
+                is_weights = np.append(is_weights, pad)
+            else:
+                is_weights = is_weights[:len(batch)]
+
+        bsize = len(batch)
         np_batch = []
-        for x in range(len(Transition._fields)):
+        for x in xrange(len(Transition._fields)):
             v = []
-            for i in xrange(batch_size):
+            for i in xrange(bsize):
                 v.append(batch[i][x])
             np_batch.append(np.vstack(v))
 
-        return Transition(*np_batch)
+        return Transition(*np_batch), idxs, is_weights
 
     def train(self, batch_size=1, num_batches=100):
         """ Train DQN with experience buffer that comes from both user and world model interaction."""
@@ -278,29 +375,44 @@ class AgentDQN(Agent):
         self.cur_bellman_err_planning = 0.
         self.running_expereince_pool = list(self.experience_replay_pool) + list(self.experience_replay_pool_from_model)
 
-        for iter_batch in range(num_batches):
-            for iter in range(len(self.running_expereince_pool) / (batch_size)):
+        for iter_batch in xrange(num_batches):
+            if self.replay == 'per':
+                n_steps = len(self.per_buffer) / (batch_size)
+            elif self.use_hper:
+                n_steps = len(self.hper_buffer) / (batch_size)
+            else:
+                n_steps = len(self.running_expereince_pool) / (batch_size)
+            for iter in xrange(n_steps):
                 self.optimizer.zero_grad()
-                batch = self.sample_from_buffer(batch_size)
+                batch, idxs, is_weights = self.sample_from_buffer(batch_size)
+                if batch is None:
+                    continue
 
-                state_value = self.dqn(torch.FloatTensor(batch.state)).gather(1, torch.tensor(batch.action))
+                state_value = self.dqn(torch.FloatTensor(batch.state)).gather(1, torch.LongTensor(batch.action))
                 next_state_value, _ = self.target_dqn(torch.FloatTensor(batch.next_state)).max(1)
                 next_state_value = next_state_value.unsqueeze(1)
                 term = np.asarray(batch.term, dtype=np.float32)
-                expected_value = torch.FloatTensor(batch.reward) + self.gamma * next_state_value * (
-                    1 - torch.FloatTensor(term))
+                expected_value = torch.FloatTensor(batch.reward) + self.gamma * next_state_value * (1 - torch.FloatTensor(term))
 
-                loss = F.mse_loss(state_value, expected_value)
+                loss = (state_value - expected_value).pow(2)
+                loss = loss * torch.FloatTensor(is_weights).unsqueeze(1)
+                loss = loss.mean()
                 loss.backward()
                 self.optimizer.step()
                 self.cur_bellman_err += loss.item()
 
+                if self.replay == 'per':
+                    errors = (state_value - expected_value).detach().numpy().flatten()
+                    self.per_buffer.update(idxs, errors)
+                elif self.use_hper:
+                    errors = (state_value - expected_value).detach().numpy().flatten()
+                    self.hper_buffer.update(idxs, errors)
+
             if len(self.experience_replay_pool) != 0:
-                print (
-                    "cur bellman err %.4f, experience replay pool %s, model replay pool %s, cur bellman err for planning %.4f" % (
-                        float(self.cur_bellman_err) / (len(self.experience_replay_pool) / (float(batch_size))),
-                        len(self.experience_replay_pool), len(self.experience_replay_pool_from_model),
-                        self.cur_bellman_err_planning))
+                print "cur bellman err %.4f, experience replay pool %s, model replay pool %s, cur bellman err for planning %.4f" % (
+                    float(self.cur_bellman_err) / (len(self.experience_replay_pool) / (float(batch_size))),
+                    len(self.experience_replay_pool), len(self.experience_replay_pool_from_model),
+                    self.cur_bellman_err_planning)
 
     # def train_one_iter(self, batch_size=1, num_batches=100, planning=False):
     #     """ Train DQN with experience replay """
